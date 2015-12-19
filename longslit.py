@@ -5,11 +5,15 @@ Rough order of business:
     Flat field and bias
     Wavelength solution
     Trace and continuum subtraction
+12/18/15
+    New plan: do reduction on individual chips (rather than trying to do the
+    whole darn thing at once.
 '''
 
 import sys, os, re
 import numpy as np
 from astropy.io import fits
+from astroscrappy import detect_cosmics
 
 def deimos_cards(shape, bunit='Counts'):
     '''
@@ -75,6 +79,7 @@ def undeimos(fitsname, output=None):
         x_low, x_high, y_low, y_high = map(float, strings)
         # need to adjust the low values to account for zero-based indexing
         x_low, y_low = x_low - 1., y_low - 1.
+        # remove overscan pixels
         data_arrays.append(hdulist[i].data[y_low: y_high, x_low: x_high])
 
     # I'm hard-coding in the layout of the DEIMOS chip now, with 8 CCDs in the
@@ -99,7 +104,7 @@ def undeimos(fitsname, output=None):
         
     return stack
 
-def make_masterbias(output="masterbias.fits", biasdir="./bias"):
+def make_masterbias(output="masterbias.fits", biasdir="./bias", remove_cr=True):
     '''
     Creates a median bias file from fits files found in biasdir.
     '''
@@ -108,6 +113,8 @@ def make_masterbias(output="masterbias.fits", biasdir="./bias"):
     for i, f in enumerate(bias_files):
         bias_data.append(undeimos(biasdir + "/" + f))
     bias = np.median(np.array(bias_data), axis=0)
+    if remove_cr:
+        mask, bias = detect_cosmics(bias)
     hdu = fits.PrimaryHDU()
     hdu.data = bias
     hdu.header.extend(deimos_cards(bias.shape))
@@ -134,7 +141,7 @@ def make_masterflat(output="masterflat.fits", flatdir="./flats", bias="masterbia
     return flat
 
     
-def normalize(raw_data, singlefits=True, masterflat=None, masterbias=None,
+def normalize(raw_data, singlefits=False, masterflat=None, masterbias=None,
               flatdir="./flats", biasdir="./bias", output=None):
     '''
     Flat field and bias subtraction.
@@ -196,7 +203,6 @@ def normalize(raw_data, singlefits=True, masterflat=None, masterbias=None,
         hdu.header = header
         hdu.writeto(output, clobber=True)       
 
-    return flat
     return normed_data
 
 
