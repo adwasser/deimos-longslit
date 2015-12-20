@@ -10,7 +10,7 @@ Rough order of business:
     whole darn thing at once.
 '''
 
-import sys, os, re
+import sys, os, re, glob
 import numpy as np
 from astropy.io import fits
 from astroscrappy import detect_cosmics
@@ -48,21 +48,11 @@ def grating_to_disp(name):
         return 0.33
     else:
         return np.nan
-        
-def undeimos(fitsname, output=None):
+
+def open_deimos(fitsname, output=None):
     '''
-    Takes the standard DEIMOS packaging of fits header data units (hdu's) and
-    rearranges them into one 2d array with x and y corresponding to physical
-    dimesions (roughly spatial and spectral, respectively).
-    
-    Parameters:
-    -------------
-        :fitsname: string, name of fits file written to by DEIMOS
-        :output: string, name of file to write out to (optional)
-                 if None, then just returns the array
-    Returns:
-    ------------
-        :raw_data: 2d numpy array, rows are spectral, columns are spatial
+    Opens a DEIMOS fits mosaic, removes the overscan region, and returns a list
+    of 2d numpy arrays representing the 8 ccd chips.
     '''
     # f is an HDU list, with f[0] being the primary HDU and f[1:9] being the
     # image arrays
@@ -87,38 +77,53 @@ def undeimos(fitsname, output=None):
     # The bottom ones have their origin in the lower left, the top ones have
     # their origin in the upper right.
 
-    chips_per_layer = len(data_arrays) / 2
-    # rotate by 180 degrees the top CCDs
-    for i in range(chips_per_layer, len(data_arrays)):
-        data_arrays[i] = np.rot90(data_arrays[i], 2)
-        
-    # stacks on stacks on stacks
-    bottom = np.concatenate(data_arrays[0: chips_per_layer], axis=1)
-    top = np.concatenate(data_arrays[chips_per_layer:], axis=1)
-    stack = np.concatenate((bottom, top), axis=0)
-
     if output is not None:
+        chips_per_layer = len(data_arrays) / 2
+        # stacks on stacks on stacks
+        bottom = np.concatenate(data_arrays[0: chips_per_layer], axis=1)
+        top = np.concatenate(data_arrays[chips_per_layer:], axis=1)
+        # need to rotate to orient correctly
+        # rotate by 180 degrees the top CCDs
+        for i in range(len(top)):
+            top[i] = np.rot90(top[i], 2)
+        stack = np.concatenate((bottom, top), axis=0)
         header = hdulist[0].header
         header.extend(deimos_cards(stack.shape))
         fits.writeto(output, stack, header=header, clobber=True)
-        
-    return stack
 
+    return data_arrays
+    
 def make_masterbias(output="masterbias.fits", biasdir="./bias", remove_cr=True):
     '''
     Creates a median bias file from fits files found in biasdir.
     '''
-    bias_files = os.listdir(biasdir)
+    bias_files = glob.glob(biasdir + "*.fits")
     bias_data = []
+    # arbitrarily taking the first exposure as the header info
+    hdulist = fits.open(bias_files[0])
+    headers = [hdu.header for hdu in hdulist]
     for i, f in enumerate(bias_files):
-        bias_data.append(undeimos(biasdir + "/" + f))
-    bias = np.median(np.array(bias_data), axis=0)
+        bias_data.append(np.array(open_deimos(f)))
+    # axis 0 is different exposures, axis 1 is different CCDs
+    # axis 2, 3 are y, x
+    bias_data = np.array(bias_data)
+    bias = np.median(bias_data, axis=0)
     if remove_cr:
-        mask, bias = detect_cosmics(bias)
-    hdu = fits.PrimaryHDU()
-    hdu.data = bias
-    hdu.header.extend(deimos_cards(bias.shape))
-    hdu.writeto(output, clobber=True)
+        masks = []
+        cr_cleaned = []
+        for frame in bias:
+            mask, cleaned = detect_cosmics(frame)
+            masks.append(mask)
+            cr_cleaned.append(cleaned)
+        bias = cr_cleaned
+    if output is not None:
+        hdulist = []
+        for i, frame in enumerate(bias):
+            hdu = fits.ImageHDU(frame)
+            hdu.header = headers[i]
+            hdulist.append(hdu)
+        hdulist = fits.HDUList(hdulist)
+        hdulist.writeto(output)
     return bias
     
 def make_masterflat(output="masterflat.fits", flatdir="./flats", bias="masterbias.fits"):
