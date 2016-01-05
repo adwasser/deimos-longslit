@@ -12,6 +12,7 @@ Rough order of business:
 
 import sys, os, re, glob
 import numpy as np
+from scipy import optimize
 from astropy.io import fits
 from astroscrappy import detect_cosmics
 
@@ -34,6 +35,7 @@ def deimos_cards(shape, bunit='Counts'):
     header['CTYPE2'] = 'Dispersion Pixel'
     return header.items()
 
+
 def grating_to_disp(name):
     '''
     Returns the dispersion in angstroms per pixel for a given DEIMOS grating
@@ -49,15 +51,14 @@ def grating_to_disp(name):
     else:
         return np.nan
 
-def open_deimos(fitsname, output=None):
+
+def remove_overscan(fitsname):
     '''
-    Opens a DEIMOS fits mosaic, removes the overscan region, and returns a list
-    of 2d numpy arrays representing the 8 ccd chips.
+    Removes the overscan region using the values set in header.
     '''
-    # f is an HDU list, with f[0] being the primary HDU and f[1:9] being the
-    # image arrays
     hdulist = fits.open(fitsname)
     data_arrays = []
+    
     # Everybody stand back.  I know regular expressions.
     pattern  = re.compile('\[([0-9]+):([0-9]+),([0-9]+):([0-9]+)\]')
     # there are eight images
@@ -71,6 +72,23 @@ def open_deimos(fitsname, output=None):
         x_low, y_low = x_low - 1., y_low - 1.
         # remove overscan pixels
         data_arrays.append(hdulist[i].data[y_low: y_high, x_low: x_high])
+
+    return data_arrays
+
+
+def open_deimos(fitsname, output=None, crop=False):
+    '''
+    Opens a DEIMOS fits mosaic and returns a list
+    of 2d numpy arrays representing the 8 ccd chips.
+    If crop=True, then remove the overscan regions first.
+    If output is not None, write to a single fits file.
+    '''
+    # HDU list has f[0] being the primary HDU and f[1:9] being the image arrays
+    hdulist = fits.open(fitsname)
+    if crop:
+        data_arrays = remove_overscan(fitsname)
+    else:
+        data_arrays = np.array([hdulist[i].data for i in range(1, 9)])
 
     # I'm hard-coding in the layout of the DEIMOS chip now, with 8 CCDs in the
     # mosaic, 1-4 on the bottom and 5-8 on the top
@@ -93,7 +111,8 @@ def open_deimos(fitsname, output=None):
 
     return data_arrays
     
-def make_masterbias(output="masterbias.fits", biasdir="./bias", remove_cr=True):
+
+def make_masterbias(output="masterbias.fits", biasdir="bias/", remove_cr=True):
     '''
     Creates a median bias file from fits files found in biasdir.
     '''
@@ -112,20 +131,25 @@ def make_masterbias(output="masterbias.fits", biasdir="./bias", remove_cr=True):
         masks = []
         cr_cleaned = []
         for frame in bias:
-            mask, cleaned = detect_cosmics(frame)
+            mask, cleaned = detect_cosmics(frame, verbose=True,
+                                           cleantype='medmask',
+                                           sigclip=0.2)
             masks.append(mask)
             cr_cleaned.append(cleaned)
         bias = cr_cleaned
+
     if output is not None:
         hdulist = []
+        primary = fits.PrimaryHDU(header=headers[0])
+        hdulist.append(primary)
         for i, frame in enumerate(bias):
-            hdu = fits.ImageHDU(frame)
-            hdu.header = headers[i]
+            hdu = fits.ImageHDU(data=frame, header=headers[i + 1])
             hdulist.append(hdu)
         hdulist = fits.HDUList(hdulist)
-        hdulist.writeto(output)
+        hdulist.writeto(output, clobber=True)
     return bias
-    
+
+
 def make_masterflat(output="masterflat.fits", flatdir="./flats", bias="masterbias.fits"):
     '''
     Creates a mean flat field from fits files found in flatdir.
@@ -152,7 +176,7 @@ def normalize(raw_data, singlefits=False, masterflat=None, masterbias=None,
     Flat field and bias subtraction.
     
     Parameters:
-    -------------
+    -----------
         :data: either string or 2d array, if string then name of fits file,
                if 2d array, then the output of arrange_fits
         :singlefits: boolean, if false, then the data filename refers to the
@@ -166,7 +190,7 @@ def normalize(raw_data, singlefits=False, masterflat=None, masterbias=None,
         :output: string, name of file to write out to (optional)
                  if None, then just returns the array
     Returns:
-    ------------
+    --------
         :normalized_data: 2d numpy array, rows are spectral, columns are spatial
     '''
     if isinstance(raw_data, str):
@@ -211,6 +235,44 @@ def normalize(raw_data, singlefits=False, masterflat=None, masterbias=None,
     return normed_data
 
 
+def ap_trace(data, spatial_pixel,
+             nsteps=20, nsigma=15, seeing=1., arcsec_per_pix=0.1185):
+    '''
+    Traces the spatial apeture of a gaussian point source.
+
+    Parameters:
+    -----------
+    data: 2d numpy array
+    spatial_pixel: int, initial guess for the spatial position (here assumed as
+                   x-axis) of the source
+    nsteps: int, number of spectral bins to fit trace
+    nsigma: float, how far away from the peak should the trace look, in stdev
+    seeing: float, in arcsec, used to get an initial sigma guess for the trace
+    arcsec_per_pix: float, float, should get from header, default for DEIMOS
+
+    Returns:
+    --------
+    trace: 1d numpy array, spatial (x) pixel index for each spectral (y) point
+    '''
+
+    y_size, x_size = data.shape
+    spectral_bins = np.linspace(0, y_size, nbins)
+
+    for i in range(nbins - 1):
+        # fit gaussian to spatial trace, flattening spectral axis
+        pass
+    
+
 def wavelength_solution():
     pass
+
+def wavelength_extract(wavesol, trace):
+    pass
+
+def ap_extract(data, trace):
+    '''
+    Extract the spectrum using a specified trace.
+    '''
+    pass
+    
 
