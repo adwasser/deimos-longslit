@@ -12,7 +12,11 @@ Rough order of business:
 
 import sys, os, re, glob
 import numpy as np
-from scipy import optimize
+from scipy.optimize import curve_fit
+from astropy.convolution import convolve, Box1DKernel
+import scipy.signal
+from scipy.interpolate import UnivariateSpline
+from scipy.interpolate import SmoothBivariateSpline
 from astropy.io import fits
 from astroscrappy import detect_cosmics
 
@@ -72,10 +76,43 @@ def remove_overscan(fitsname):
         x_low, y_low = x_low - 1., y_low - 1.
         # remove overscan pixels
         data_arrays.append(hdulist[i].data[y_low: y_high, x_low: x_high])
-
+    data_arrays = np.array(data_arrays)
+    
     return data_arrays
 
+def multiextension_to_array(data_arrays):
+    '''
+    Takes the eight DEIMOS ccd arrays and returns a single array oriented
+    correctly.
+    '''
+    chips_per_layer = len(data_arrays) / 2
+    # stacks on stacks on stacks
+    bottom = np.concatenate(data_arrays[0: chips_per_layer], axis=1)
+    tops = data_arrays[chips_per_layer:]
+    # rotate by 180 degrees the top CCDs
+    tops = [np.rot90(a, 2) for a in tops]
+    top = np.concatenate(tops, axis=1)
 
+    stack = np.concatenate((bottom, top), axis=0)
+    return stack
+
+def array_to_multiextension(data_array):
+    '''
+    Splits a single array back into the eight DEIMOS ccds.
+    '''
+    rows = 2
+    columns = 4
+    bottom, top = np.split(data_array, rows, axis=0)
+    bottoms = np.split(bottom, columns, axis=1)
+    tops = np.split(top, columns, axis=1)
+
+    # unrotate by 180 deg
+    tops = [np.rot90(a, 2) for a in tops]
+
+    bottoms.append(tops)
+    return bottoms
+    
+    
 def open_deimos(fitsname, output=None, crop=False):
     '''
     Opens a DEIMOS fits mosaic and returns a list
@@ -85,7 +122,8 @@ def open_deimos(fitsname, output=None, crop=False):
     '''
     # HDU list has f[0] being the primary HDU and f[1:9] being the image arrays
     hdulist = fits.open(fitsname)
-    if crop:
+    # need to crop if outputing as single fits!
+    if crop or output is not None:
         data_arrays = remove_overscan(fitsname)
     else:
         data_arrays = np.array([hdulist[i].data for i in range(1, 9)])
@@ -96,15 +134,7 @@ def open_deimos(fitsname, output=None, crop=False):
     # their origin in the upper right.
 
     if output is not None:
-        chips_per_layer = len(data_arrays) / 2
-        # stacks on stacks on stacks
-        bottom = np.concatenate(data_arrays[0: chips_per_layer], axis=1)
-        top = np.concatenate(data_arrays[chips_per_layer:], axis=1)
-        # need to rotate to orient correctly
-        # rotate by 180 degrees the top CCDs
-        for i in range(len(top)):
-            top[i] = np.rot90(top[i], 2)
-        stack = np.concatenate((bottom, top), axis=0)
+        stack = multiextention_to_array(data_arrays)
         header = hdulist[0].header
         header.extend(deimos_cards(stack.shape))
         fits.writeto(output, stack, header=header, clobber=True)
@@ -150,23 +180,65 @@ def make_masterbias(output="masterbias.fits", biasdir="bias/", remove_cr=True):
     return bias
 
 
-def make_masterflat(output="masterflat.fits", flatdir="./flats", bias="masterbias.fits"):
+def make_masterflat(output="masterflat.fits", flatdir="flats/", bias="masterbias.fits"):
     '''
     Creates a mean flat field from fits files found in flatdir.
     '''
     if isinstance(bias, str):
-        bias = fits.getdata(bias)
-        
-    flat_files = os.listdir(flatdir)
+        bias = open_deimos(bias, crop=True)
+
+    flat_files = glob.glob(flatdir + "*.fits")
     flat_data = []
-    for i, f in enumerate(flat_files):
-        flat_data.append(undeimos(flatdir + "/" + f))
-    # subtract master bias from mean flat
-    flat = np.mean(np.array(flat_data), axis=0) - bias
-    hdu = fits.PrimaryHDU()
-    hdu.data = flat
-    hdu.header.extend(deimos_cards(flat.shape))
-    hdu.writeto(output, clobber=True)
+    # arbitrarily taking the first exposure as the header info
+    hdulist = fits.open(flat_files[0])
+    headers = [hdu.header for hdu in hdulist]
+
+    # fraction of median level to count as illuminated
+    illum_threshold = 0.8
+
+    for i, flat_file in enumerate(flat_files):
+        # bias subtract the flats here
+        subframes = open_deimos(flat_file, crop=True) - bias
+        new_subframes = np.empty(subframes.shape)
+        # norm out by median of illuminated pixels
+        for j, subframe in enumerate(subframes):
+            illuminated = np.where(subframe >= illum_threshold * np.median(subframe))
+            normed = subframe / np.median(subframe[illuminated])
+            new_subframes[j] = normed
+        flat_data.append(new_subframes)
+    # axis 0 is different exposures, axis 1 is different CCDs
+    # axis 2, 3 are y, x
+    flat_data = np.array(flat_data)
+    flat = np.mean(flat_data, axis=0)
+
+    # combine into one array for the lamp division
+    flat = multiextension_to_array(flat)
+    
+    # divide out by flat field lamp spectrum
+    spectral_size, spatial_size = flat.shape
+    spectral_pixels = np.arange(spectral_size)
+    spatial_pixels = np.arange(spatial_size)
+    # response technique from PyDIS (https://github.com/jradavenport/pydis)
+    flat_1d = np.log10(convolve(flat.sum(axis=1), Box1DKernel(5)))
+    spline = UnivariateSpline(spectral_pixels, flat_1d, ext=0, k=2, s=0.001)
+    flat_curve = 10.0 ** spline(spectral_pixels)
+    # tile back up to shape of flat file
+    flat_curve = np.tile(np.split(flat_curve, flat_curve.size, axis=0), (1, spatial_size))
+    flat = flat / flat_curve
+
+    # unpack back into multiextension format
+    flat = array_to_multiextension(flat)
+    
+    if output is not None:
+        hdulist = []
+        primary = fits.PrimaryHDU(header=headers[0])
+        hdulist.append(primary)
+        for i, frame in enumerate(flat):
+            hdu = fits.ImageHDU(data=frame, header=headers[i + 1])
+            hdulist.append(hdu)
+        hdulist = fits.HDUList(hdulist)
+        hdulist.writeto(output, clobber=True)
+
     return flat
 
     
