@@ -10,7 +10,7 @@ Rough order of business:
     whole darn thing at once.
 '''
 
-import sys, os, re, glob
+import sys, os, glob
 import numpy as np
 from scipy.optimize import curve_fit
 from astropy.convolution import convolve, Box1DKernel
@@ -18,6 +18,7 @@ import scipy.signal
 from scipy.interpolate import UnivariateSpline
 from scipy.interpolate import SmoothBivariateSpline
 from astropy.io import fits
+from astropy.wcs import WCS
 from astroscrappy import detect_cosmics
 
 def deimos_cards(shape, bunit='Counts'):
@@ -29,14 +30,15 @@ def deimos_cards(shape, bunit='Counts'):
     header['NAXIS1'] = shape[0]
     header['NAXIS2'] = shape[1]        
     header['BUNIT'] = bunit
+    header['WCSNAME'] = 'array'
     header['CRPIX1'] = 1
     header['CRPIX2'] = 1        
-    header['CRVAL1'] = 0.5
-    header['CRVAL2'] = 0.5
+    header['CRVAL1'] = 0
+    header['CRVAL2'] = 0
     header['CDELT1'] = 1
     header['CDELT2'] = 1
-    header['CTYPE1'] = 'Spatial Pixel'
-    header['CTYPE2'] = 'Dispersion Pixel'
+    header['CTYPE1'] = 'Spatial_Pixel'
+    header['CTYPE2'] = 'Dispersion_Pixel'
     return header.items()
 
 
@@ -56,6 +58,16 @@ def grating_to_disp(name):
         return np.nan
 
 
+def get_indices(datasec):
+    '''
+    Takes a string from the fits header in the form '[x1:x2, y1:y2]' and returns
+    a list with [x1, x2, y1, y2].
+    '''
+    xs, ys = [s.split(':') for s in datasec.strip('[]').split(',')]
+    xs.extend(ys)
+    return map(float, xs)
+    
+
 def remove_overscan(fitsname):
     '''
     Removes the overscan region using the values set in header.
@@ -63,15 +75,12 @@ def remove_overscan(fitsname):
     hdulist = fits.open(fitsname)
     data_arrays = []
     
-    # Everybody stand back.  I know regular expressions.
-    pattern  = re.compile('\[([0-9]+):([0-9]+),([0-9]+):([0-9]+)\]')
     # there are eight images
     for i in range(1, 9):
         y_size, x_size = hdulist[i].shape
         # get the usable pixels in the image, defined in the DATASEC keyword
         datasec = hdulist[i].header['DATASEC']
-        strings = pattern.match(datasec).group(1, 2, 3, 4)
-        x_low, x_high, y_low, y_high = map(float, strings)
+        x_low, x_high, y_low, y_high = get_indices(datasec)
         # need to adjust the low values to account for zero-based indexing
         x_low, y_low = x_low - 1., y_low - 1.
         # remove overscan pixels
@@ -80,25 +89,68 @@ def remove_overscan(fitsname):
     
     return data_arrays
 
-def multiextension_to_array(data_arrays):
+
+def multiextension_to_array(fitsfile=None, data_arrays=None, headers=None):
     '''
     Takes the eight DEIMOS ccd arrays and returns a single array oriented
-    correctly.
+    correctly.  Supply the list of headers to insure the correct orientation.
     '''
-    chips_per_layer = len(data_arrays) / 2
-    # stacks on stacks on stacks
-    bottom = np.concatenate(data_arrays[0: chips_per_layer], axis=1)
-    tops = data_arrays[chips_per_layer:]
-    # rotate by 180 degrees the top CCDs
-    tops = [np.rot90(a, 2) for a in tops]
-    top = np.concatenate(tops, axis=1)
+    rows = 2
+    columns = 4
+    nimages = rows * columns
 
-    stack = np.concatenate((bottom, top), axis=0)
-    return stack
+    if fitsfile is None:
+        arrays = data_arrays
+    elif data_arrays is None or headers is None:
+        raise KeyError('Need either fitsfile or both arrays and headers!')
+    else:
+        hdulist = fits.open(fitsfile)
+        primaryHDU = hdulist[0]
+        headers = [hdu.header for hdu in hdulist[1: nimages + 1]]
+        arrays = [hdu.data for hdu in hdulist[1: nimages + 1]]
+    wcslist = [WCS(header) for header in headers]
 
-def array_to_multiextension(data_array):
+    # get the mosaic image size from any of the headers 
+    det_x0, det_x1, det_y0, det_y1 = get_indices(headers[0]['DETSIZE'])
+    mosaic = np.empty(shape=(det_y1, det_x1))
+    mosaic[:] = np.nan
+
+    for i, data in enumerate(arrays):
+        '''
+        I'm assuming the wcs transformation is perfectly linear, so I can just
+        specify the start and end pixels.
+        '''
+        # select the data which isn't part of the overscan region
+        x0, x1, y0, y1 = get_indices(headers[i]['DATASEC'])
+        # get the direction of pixel increments
+        dx = float(headers[i]['CD1_1'])
+        dy = float(headers[i]['CD2_2'])
+        
+        # subtract by 1 to convert from FITS format 1-based indexing to 0-based
+        indices = np.index_exp[y0 - 1: y1, x0 - 1: x1]
+        start = [x0 - 1, y0 - 1]
+        end = [x1, y1]
+        old_coords = np.array([start, end])
+        
+        # subtract 0.5 to convert from DEIMOS plane wcs definition to indices
+        new_coords = wcslist[i].all_pix2world(old_coords, 0) - 0.5
+        new_start, new_end = map(list, new_coords)
+        # need to handle going backwards in the slice
+        new_end[0] = None if new_end[0] < 0 else new_end[0]
+        new_end[1] = None if new_end[1] < 0 else new_end[1]        
+        
+        # remember to switch from x, y in FITS to y, x in numpy
+        new_indices = np.index_exp[new_start[1]: new_end[1]: dy,
+                                   new_start[0]: new_end[0]: dx]
+        mosaic[new_indices] = data[indices]
+    return mosaic
+
+
+def array_to_multiextension(data_array, headers=None):
     '''
     Splits a single array back into the eight DEIMOS ccds.
+    If given a list of eight headers, then update the headers accordingly
+    and return them with the array.
     '''
     rows = 2
     columns = 4
@@ -106,11 +158,23 @@ def array_to_multiextension(data_array):
     bottoms = np.split(bottom, columns, axis=1)
     tops = np.split(top, columns, axis=1)
 
-    # unrotate by 180 deg
-    tops = [np.rot90(a, 2) for a in tops]
-
     bottoms.append(tops)
-    return bottoms
+    data = bottoms
+
+    if headers is not None:
+        y_size, x_size = data.shape
+        for i, header in enumerate(headers):
+            header['CRVAL1'] = 0.5 + x_size * (i % columns)
+            header['CRVAL2'] = 0.5 + y_size * np.floor_divide(i, columns)
+            header['CRPIX1'] = 1
+            header['CRPIX2'] = 1
+            header['CD1_1'] = 1
+            header['CD1_2'] = 0            
+            header['CD2_1'] = 0
+            header['CD2_2'] = 1            
+        return data, headers
+    else:
+        return data
     
     
 def open_deimos(fitsname, output=None, crop=False):
@@ -166,7 +230,7 @@ def make_masterbias(output="masterbias.fits", biasdir="bias/", remove_cr=True):
                                            sigclip=0.2)
             masks.append(mask)
             cr_cleaned.append(cleaned)
-        bias = cr_cleaned
+        bias = np.array(cr_cleaned)
 
     if output is not None:
         hdulist = []
@@ -227,14 +291,14 @@ def make_masterflat(output="masterflat.fits", flatdir="flats/", bias="masterbias
     flat = flat / flat_curve
 
     # unpack back into multiextension format
-    flat = array_to_multiextension(flat)
+    flat_subframes, new_headers = array_to_multiextension(flat, headers[1:9])
     
     if output is not None:
         hdulist = []
         primary = fits.PrimaryHDU(header=headers[0])
         hdulist.append(primary)
-        for i, frame in enumerate(flat):
-            hdu = fits.ImageHDU(data=frame, header=headers[i + 1])
+        for i, frame in enumerate(flat_subframes):
+            hdu = fits.ImageHDU(data=frame, header=new_headers[i])
             hdulist.append(hdu)
         hdulist = fits.HDUList(hdulist)
         hdulist.writeto(output, clobber=True)
