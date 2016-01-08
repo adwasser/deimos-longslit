@@ -12,8 +12,9 @@ Rough order of business:
 
 import sys, os, glob
 import numpy as np
+import numpy.ma as ma
 from scipy.optimize import curve_fit
-from astropy.convolution import convolve, Box1DKernel
+from astropy.convolution import convolve, Box1DKernel, Box2DKernel
 import scipy.signal
 from scipy.interpolate import UnivariateSpline
 from scipy.interpolate import SmoothBivariateSpline
@@ -27,8 +28,9 @@ def deimos_cards(shape, bunit='Counts'):
     '''
     header = {}
     header['NAXIS'] = 2
-    header['NAXIS1'] = shape[0]
-    header['NAXIS2'] = shape[1]        
+    # switch between numpy row-column convention and fits column-row convention
+    header['NAXIS1'] = shape[1]
+    header['NAXIS2'] = shape[0]        
     header['BUNIT'] = bunit
     header['WCSNAME'] = 'array'
     header['CRPIX1'] = 1
@@ -68,29 +70,41 @@ def get_indices(datasec):
     return map(float, xs)
     
 
-def remove_overscan(fitsname):
+def remove_overscan(fitsname=None, data_arrays=None, headers=None):
     '''
     Removes the overscan region using the values set in header.
     '''
-    hdulist = fits.open(fitsname)
-    data_arrays = []
-    
+    rows = 2
+    columns = 4
+    nimages = rows * columns
+
+    if fitsname is not None:
+        hdulist = fits.open(fitsname)
+        primaryHDU = hdulist[0]
+        headers = [hdu.header for hdu in hdulist[1: nimages + 1]]
+        arrays = [hdu.data for hdu in hdulist[1: nimages + 1]]
+    elif data_arrays is not None and headers is not None:
+        arrays = data_arrays        
+    else:
+        raise KeyError('Need either fitsname or both arrays and headers!')
+
+    new_arrays = []
     # there are eight images
     for i in range(1, 9):
-        y_size, x_size = hdulist[i].shape
+        y_size, x_size = arrays[i].shape
         # get the usable pixels in the image, defined in the DATASEC keyword
-        datasec = hdulist[i].header['DATASEC']
+        datasec = headers[i]['DATASEC']
         x_low, x_high, y_low, y_high = get_indices(datasec)
         # need to adjust the low values to account for zero-based indexing
         x_low, y_low = x_low - 1., y_low - 1.
         # remove overscan pixels
-        data_arrays.append(hdulist[i].data[y_low: y_high, x_low: x_high])
-    data_arrays = np.array(data_arrays)
+        new_arrays.append(arrays[i][y_low: y_high, x_low: x_high])
+    new_arrays = np.array(new_arrays)
     
-    return data_arrays
+    return new_arrays
 
 
-def multiextension_to_array(fitsfile=None, data_arrays=None, headers=None):
+def multiextension_to_array(fitsname=None, data_arrays=None, headers=None):
     '''
     Takes the eight DEIMOS ccd arrays and returns a single array oriented
     correctly.  Supply the list of headers to insure the correct orientation.
@@ -99,15 +113,15 @@ def multiextension_to_array(fitsfile=None, data_arrays=None, headers=None):
     columns = 4
     nimages = rows * columns
 
-    if fitsfile is None:
-        arrays = data_arrays
-    elif data_arrays is None or headers is None:
-        raise KeyError('Need either fitsfile or both arrays and headers!')
-    else:
-        hdulist = fits.open(fitsfile)
+    if fitsname is not None:
+        hdulist = fits.open(fitsname)
         primaryHDU = hdulist[0]
         headers = [hdu.header for hdu in hdulist[1: nimages + 1]]
         arrays = [hdu.data for hdu in hdulist[1: nimages + 1]]
+    elif data_arrays is not None and headers is not None:
+        arrays = data_arrays        
+    else:
+        raise KeyError('Need either fitsname or both arrays and headers!')
     wcslist = [WCS(header) for header in headers]
 
     # get the mosaic image size from any of the headers 
@@ -143,67 +157,8 @@ def multiextension_to_array(fitsfile=None, data_arrays=None, headers=None):
         new_indices = np.index_exp[new_start[1]: new_end[1]: dy,
                                    new_start[0]: new_end[0]: dx]
         mosaic[new_indices] = data[indices]
+
     return mosaic
-
-
-def array_to_multiextension(data_array, headers=None):
-    '''
-    Splits a single array back into the eight DEIMOS ccds.
-    If given a list of eight headers, then update the headers accordingly
-    and return them with the array.
-    '''
-    rows = 2
-    columns = 4
-    bottom, top = np.split(data_array, rows, axis=0)
-    bottoms = np.split(bottom, columns, axis=1)
-    tops = np.split(top, columns, axis=1)
-
-    bottoms.append(tops)
-    data = bottoms
-
-    if headers is not None:
-        y_size, x_size = data.shape
-        for i, header in enumerate(headers):
-            header['CRVAL1'] = 0.5 + x_size * (i % columns)
-            header['CRVAL2'] = 0.5 + y_size * np.floor_divide(i, columns)
-            header['CRPIX1'] = 1
-            header['CRPIX2'] = 1
-            header['CD1_1'] = 1
-            header['CD1_2'] = 0            
-            header['CD2_1'] = 0
-            header['CD2_2'] = 1            
-        return data, headers
-    else:
-        return data
-    
-    
-def open_deimos(fitsname, output=None, crop=False):
-    '''
-    Opens a DEIMOS fits mosaic and returns a list
-    of 2d numpy arrays representing the 8 ccd chips.
-    If crop=True, then remove the overscan regions first.
-    If output is not None, write to a single fits file.
-    '''
-    # HDU list has f[0] being the primary HDU and f[1:9] being the image arrays
-    hdulist = fits.open(fitsname)
-    # need to crop if outputing as single fits!
-    if crop or output is not None:
-        data_arrays = remove_overscan(fitsname)
-    else:
-        data_arrays = np.array([hdulist[i].data for i in range(1, 9)])
-
-    # I'm hard-coding in the layout of the DEIMOS chip now, with 8 CCDs in the
-    # mosaic, 1-4 on the bottom and 5-8 on the top
-    # The bottom ones have their origin in the lower left, the top ones have
-    # their origin in the upper right.
-
-    if output is not None:
-        stack = multiextention_to_array(data_arrays)
-        header = hdulist[0].header
-        header.extend(deimos_cards(stack.shape))
-        fits.writeto(output, stack, header=header, clobber=True)
-
-    return data_arrays
     
 
 def make_masterbias(output="masterbias.fits", biasdir="bias/", remove_cr=True):
@@ -211,16 +166,19 @@ def make_masterbias(output="masterbias.fits", biasdir="bias/", remove_cr=True):
     Creates a median bias file from fits files found in biasdir.
     '''
     bias_files = glob.glob(biasdir + "*.fits")
-    bias_data = []
     # arbitrarily taking the first exposure as the header info
     hdulist = fits.open(bias_files[0])
-    headers = [hdu.header for hdu in hdulist]
-    for i, f in enumerate(bias_files):
-        bias_data.append(np.array(open_deimos(f)))
+    headers = [hdu.header for hdu in hdulist[1:9]]
+
+    bias_data = []
     # axis 0 is different exposures, axis 1 is different CCDs
     # axis 2, 3 are y, x
+    for i, f in enumerate(bias_files):
+        bias_data.append(np.array([hdu.data for hdu in fits.open(f)[1:9]]))
     bias_data = np.array(bias_data)
-    bias = np.median(bias_data, axis=0)
+
+    # if we have more bias frames, we should cr subtract before medianing biases
+    bias = np.nanmedian(bias_data, axis=0)
     if remove_cr:
         masks = []
         cr_cleaned = []
@@ -232,15 +190,13 @@ def make_masterbias(output="masterbias.fits", biasdir="bias/", remove_cr=True):
             cr_cleaned.append(cleaned)
         bias = np.array(cr_cleaned)
 
+        
+    bias = multiextension_to_array(data_arrays=bias, headers=headers)
     if output is not None:
-        hdulist = []
-        primary = fits.PrimaryHDU(header=headers[0])
-        hdulist.append(primary)
-        for i, frame in enumerate(bias):
-            hdu = fits.ImageHDU(data=frame, header=headers[i + 1])
-            hdulist.append(hdu)
-        hdulist = fits.HDUList(hdulist)
-        hdulist.writeto(output, clobber=True)
+        header = headers[0]
+        header.extend(deimos_cards(bias.shape))
+        hdu = fits.PrimaryHDU(data=bias, header=header)
+        hdu.writeto(output, clobber=True)
     return bias
 
 
@@ -249,127 +205,127 @@ def make_masterflat(output="masterflat.fits", flatdir="flats/", bias="masterbias
     Creates a mean flat field from fits files found in flatdir.
     '''
     if isinstance(bias, str):
-        bias = open_deimos(bias, crop=True)
+        bias = fits.getdata(bias)
 
     flat_files = glob.glob(flatdir + "*.fits")
-    flat_data = []
+    flat_data = np.array([multiextension_to_array(f) for f in flat_files])
+
     # arbitrarily taking the first exposure as the header info
     hdulist = fits.open(flat_files[0])
     headers = [hdu.header for hdu in hdulist]
 
-    # fraction of median level to count as illuminated
-    illum_threshold = 0.8
+    # divide by median after subtracting bias
+    for i, data in enumerate(flat_data):
+        flat_data[i] -= bias
+        flat_data[i] /= np.nanmedian(flat_data[i])
+    # median across all frames
+    flat = np.nanmedian(flat_data, axis=0)
 
-    for i, flat_file in enumerate(flat_files):
-        # bias subtract the flats here
-        subframes = open_deimos(flat_file, crop=True) - bias
-        new_subframes = np.empty(subframes.shape)
-        # norm out by median of illuminated pixels
-        for j, subframe in enumerate(subframes):
-            illuminated = np.where(subframe >= illum_threshold * np.median(subframe))
-            normed = subframe / np.median(subframe[illuminated])
-            new_subframes[j] = normed
-        flat_data.append(new_subframes)
-    # axis 0 is different exposures, axis 1 is different CCDs
-    # axis 2, 3 are y, x
-    flat_data = np.array(flat_data)
-    flat = np.mean(flat_data, axis=0)
-
-    # combine into one array for the lamp division
-    flat = multiextension_to_array(flat)
-    
-    # divide out by flat field lamp spectrum
+    # normalize to lamp response
+    # response technique from PyDIS (https://github.com/jradavenport/pydis)
     spectral_size, spatial_size = flat.shape
     spectral_pixels = np.arange(spectral_size)
     spatial_pixels = np.arange(spatial_size)
-    # response technique from PyDIS (https://github.com/jradavenport/pydis)
     flat_1d = np.log10(convolve(flat.sum(axis=1), Box1DKernel(5)))
     spline = UnivariateSpline(spectral_pixels, flat_1d, ext=0, k=2, s=0.001)
     flat_curve = 10.0 ** spline(spectral_pixels)
     # tile back up to shape of flat file
     flat_curve = np.tile(np.split(flat_curve, flat_curve.size, axis=0), (1, spatial_size))
-    flat = flat / flat_curve
+    flat /= flat_curve
 
-    # unpack back into multiextension format
-    flat_subframes, new_headers = array_to_multiextension(flat, headers[1:9])
-    
     if output is not None:
-        hdulist = []
-        primary = fits.PrimaryHDU(header=headers[0])
-        hdulist.append(primary)
-        for i, frame in enumerate(flat_subframes):
-            hdu = fits.ImageHDU(data=frame, header=new_headers[i])
-            hdulist.append(hdu)
-        hdulist = fits.HDUList(hdulist)
-        hdulist.writeto(output, clobber=True)
-
+        hdu = fits.PrimaryHDU(data=flat,
+                              header=headers[0].extend(deimos_cards(flat.shape)))
+        hdu.writeto(output, clobber=True)
     return flat
 
-    
-def normalize(raw_data, singlefits=False, masterflat=None, masterbias=None,
-              flatdir="./flats", biasdir="./bias", output=None):
+def get_slitmask(masterflat='masterflat.fits'):
+    # mask where not spatially illuminated due to bad slit coverage
+
+    if isinstance(masterflat, str):
+        flat = fits.getdata(masterflat)
+    else:
+        # assume given the array directly
+        flat = masterflat
+    spatial = np.sum(flat, axis=0)
+    dark = spatial < 0.8 * np.nanmedian(spatial)
+    flat_mask = np.tile(dark, (flat.shape[0], 1))    
+    return flat_mask
+
+def normalize(fitsname, output=None, cr_remove=False, multiextension=True,
+              masterflat="masterflat.fits", masterbias="masterbias.fits"):
     '''
     Flat field and bias subtraction.
     
     Parameters:
     -----------
-        :data: either string or 2d array, if string then name of fits file,
-               if 2d array, then the output of arrange_fits
-        :singlefits: boolean, if false, then the data filename refers to the
-                     original DEIMOS arrangement
+        :fitsname: either string or 2d array, if string then name of fits file,
+                   if 2d array, then the output of arrange_fits
+        :output: string, name of file to write out to (optional)
+                 if None, then just returns the array
+        :cr_remove: boolean, if true, the subtract cosmics
+        :multiextension: boolean, if true, then 
         :masterflat: str, name of fits file with master flat (optional)
                      if None, then make a master flat from files in flatdir
         :masterbias: str, name of fits file with master bias (optional)
                      if None, then make a master bias from files in biasdir
-        :flatdir: string, name of directory with flat field fits files (optional)
-        :biasdir: string, name of directory with bias fits files (optional)
-        :output: string, name of file to write out to (optional)
-                 if None, then just returns the array
+
     Returns:
     --------
         :normalized_data: 2d numpy array, rows are spectral, columns are spatial
     '''
-    if isinstance(raw_data, str):
-        if singlefits:
-            data = fits.getdata(raw_data)
-        else:
-            data = undeimos(raw_data)
-
     if masterbias is None:
-        bias = make_masterbias(biasdir=biasdir)
+        bias = make_masterbias()
     else:
         bias = fits.getdata(masterbias)
-        
     if masterflat is None:
-        flat = make_masterflat(flatdir=flatdir, bias=bias)
+        flat = make_masterflat()
     else:
         flat = fits.getdata(masterflat)
-        
-    # normalize flat field
-    flat = flat / np.mean(flat)
 
-    normed_data = (data - bias) / flat
+    if multiextension:
+        raw_data = multiextension_to_array(fitsname)
+        header = fits.open(fitsname)[0].header
+        header.extend(deimos_cards(raw_data.shape))
+    else:
+        raw_data = fits.getdata(fitsname)
+        header = fits.getheader(fitsname)
+        
+    if cr_remove:
+        flat_mask = get_slitmask(flat)
+        mask, cleaned = detect_cosmics(raw_data, verbose=True,
+                                       inmask=flat_mask,
+                                       cleantype='medmask',
+                                       sigclip=4.5, niter=4)
+        normed_data = (cleaned - bias) / flat
+    else:
+        normed_data = (raw_data - bias) / flat
+
 
     if output is not None:
-        hdu = fits.PrimaryHDU()
-        if isinstance(raw_data, str):
-            header = fits.getheader(raw_data)
-            if not singlefits:
-                header.extend(deimos_cards(normed_data.shape, 'Normalized Counts'))
-        else:
-            header = hdu.header
-            header.extend(deimos_cards(normed_data.shape, 'Normalized Counts'))
-
-        flat_history = masterflat if masterflat is not None else flatdir
-        bias_history = masterbias if masterbias is not None else biasdir
-        header['HISTORY'] = 'Flat frame: ' + flat_history        
-        header['HISTORY'] = 'Bias frame: ' + bias_history
-        hdu.data = normed_data
-        hdu.header = header
-        hdu.writeto(output, clobber=True)       
-
+        fits.writeto(output, data=normed_data, header=header, clobber=True)
+    
     return normed_data
 
+
+def data_combine(files, masterbias='masterbias.fits', masterflat='masterflat.fits'):
+    '''
+    Sum a list of images.
+    '''
+    
+    data = np.array([fits.getdata(f) for f in files])
+    # median out each frame
+    frame_medians = np.nanmedian(data, axis=(1,2))[:, np.newaxis, np.newaxis]
+    data = data / frame_medians
+    # get median of frames
+    median = np.nanmedian(data, axis=0)
+
+    # remove cosmic rays through comparison with median frame
+    data = np.array([np.where(np.abs(frame - median) > 1.2 * median,
+                              convolve(frame, Box2DKernel(5)), frame)
+                     for frame in data])
+
+    return data.sum(axis=0)
 
 def ap_trace(data, spatial_pixel,
              nsteps=20, nsigma=15, seeing=1., arcsec_per_pix=0.1185):
