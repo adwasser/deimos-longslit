@@ -15,7 +15,7 @@ import numpy as np
 import numpy.ma as ma
 from scipy.optimize import curve_fit
 from astropy.convolution import convolve, Box1DKernel, Box2DKernel
-import scipy.signal
+from scipy.signal import medfilt
 from scipy.interpolate import UnivariateSpline
 from scipy.interpolate import SmoothBivariateSpline
 from astropy.io import fits
@@ -168,6 +168,7 @@ def make_masterbias(output="masterbias.fits", biasdir="bias/", remove_cr=True):
     bias_files = glob.glob(biasdir + "*.fits")
     # arbitrarily taking the first exposure as the header info
     hdulist = fits.open(bias_files[0])
+    primary_header = hdulist[0].header
     headers = [hdu.header for hdu in hdulist[1:9]]
 
     bias_data = []
@@ -189,13 +190,13 @@ def make_masterbias(output="masterbias.fits", biasdir="bias/", remove_cr=True):
             masks.append(mask)
             cr_cleaned.append(cleaned)
         bias = np.array(cr_cleaned)
-
         
     bias = multiextension_to_array(data_arrays=bias, headers=headers)
     if output is not None:
-        header = headers[0]
+        header = primary_header
         header.extend(deimos_cards(bias.shape))
-        hdu = fits.PrimaryHDU(data=bias, header=header)
+        hdu = fits.PrimaryHDU(data=bias,
+                              header=header)
         hdu.writeto(output, clobber=True)
     return bias
 
@@ -234,25 +235,29 @@ def make_masterflat(output="masterflat.fits", flatdir="flats/", bias="masterbias
     flat /= flat_curve
 
     if output is not None:
+        header = headers[0]
+        header.extend(deimos_cards(flat.shape))
         hdu = fits.PrimaryHDU(data=flat,
-                              header=headers[0].extend(deimos_cards(flat.shape)))
+                              header=header)
         hdu.writeto(output, clobber=True)
     return flat
 
 def get_slitmask(masterflat='masterflat.fits'):
     # mask where not spatially illuminated due to bad slit coverage
-
+    # also mask any spatial columns with saturated pixels
     if isinstance(masterflat, str):
         flat = fits.getdata(masterflat)
     else:
         # assume given the array directly
         flat = masterflat
     spatial = np.sum(flat, axis=0)
-    dark = spatial < 0.8 * np.nanmedian(spatial)
-    flat_mask = np.tile(dark, (flat.shape[0], 1))    
+    # smooth with a kernel size designed to remove slit gaps and bad columns
+    smoothed = medfilt(spatial, kernel_size=151)
+    bad = np.logical_or(spatial < 0.9 * smoothed, spatial > 1.1 * smoothed)
+    flat_mask = np.tile(bad, (flat.shape[0], 1))    
     return flat_mask
 
-def normalize(fitsname, output=None, cr_remove=False, multiextension=True,
+def normalize(fitsname, output=None, cr_remove=True, multiextension=True,
               masterflat="masterflat.fits", masterbias="masterbias.fits"):
     '''
     Flat field and bias subtraction.
@@ -296,7 +301,7 @@ def normalize(fitsname, output=None, cr_remove=False, multiextension=True,
         mask, cleaned = detect_cosmics(raw_data, verbose=True,
                                        inmask=flat_mask,
                                        cleantype='medmask',
-                                       sigclip=4.5, niter=4)
+                                       sigclip=0.5, sigfrac=0.1, niter=4)
         normed_data = (cleaned - bias) / flat
     else:
         normed_data = (raw_data - bias) / flat
@@ -320,14 +325,14 @@ def data_combine(files, masterbias='masterbias.fits', masterflat='masterflat.fit
     # get median of frames
     median = np.nanmedian(data, axis=0)
 
-    # remove cosmic rays through comparison with median frame
-    data = np.array([np.where(np.abs(frame - median) > 1.2 * median,
-                              convolve(frame, Box2DKernel(5)), frame)
-                     for frame in data])
-
     return data.sum(axis=0)
 
-def ap_trace(data, spatial_pixel,
+def _gaussian(x, a, b, x0, sigma):
+    # Gaussian function
+    return a * np.exp(-(x - x0)**2 / (2 * sigma**2)) + b
+
+    
+def ap_trace(data, initial_guess,
              nsteps=20, nsigma=15, seeing=1., arcsec_per_pix=0.1185):
     '''
     Traces the spatial apeture of a gaussian point source.
@@ -335,7 +340,7 @@ def ap_trace(data, spatial_pixel,
     Parameters:
     -----------
     data: 2d numpy array
-    spatial_pixel: int, initial guess for the spatial position (here assumed as
+    initial_guess: int, initial guess for the spatial position (here assumed as
                    x-axis) of the source
     nsteps: int, number of spectral bins to fit trace
     nsigma: float, how far away from the peak should the trace look, in stdev
@@ -347,12 +352,10 @@ def ap_trace(data, spatial_pixel,
     trace: 1d numpy array, spatial (x) pixel index for each spectral (y) point
     '''
 
+    flat_mask = get_slitmask(masterflat='masterflat.fits')
+    
     y_size, x_size = data.shape
     spectral_bins = np.linspace(0, y_size, nbins)
-
-    for i in range(nbins - 1):
-        # fit gaussian to spatial trace, flattening spectral axis
-        pass
     
 
 def wavelength_solution():
