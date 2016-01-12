@@ -13,6 +13,7 @@ Rough order of business:
 import sys, os, glob
 import numpy as np
 import numpy.ma as ma
+from matplotlib import pyplot as plt
 from scipy.optimize import curve_fit
 from astropy.convolution import convolve, Box1DKernel, Box2DKernel
 from scipy.signal import medfilt
@@ -333,7 +334,7 @@ def _gaussian(x, a, b, x0, sigma):
 
     
 def ap_trace(data, initial_guess,
-             nsteps=20, nsigma=15, seeing=1., arcsec_per_pix=0.1185):
+             nbins=20, nsigma=15, seeing=1., arcsec_per_pix=0.1185, frac_med=1.5):
     '''
     Traces the spatial apeture of a gaussian point source.
 
@@ -342,22 +343,73 @@ def ap_trace(data, initial_guess,
     data: 2d numpy array
     initial_guess: int, initial guess for the spatial position (here assumed as
                    x-axis) of the source
-    nsteps: int, number of spectral bins to fit trace
+    nbins: int, number of spectral bins to fit trace
     nsigma: float, how far away from the peak should the trace look, in stdev
     seeing: float, in arcsec, used to get an initial sigma guess for the trace
     arcsec_per_pix: float, float, should get from header, default for DEIMOS
+    frac_med: float, fraction of median image above which to mask (e.g., for sky lines)
 
     Returns:
     --------
     trace: 1d numpy array, spatial (x) pixel index for each spectral (y) point
     '''
 
+    # mask maker mask maker make me a mask
+    # True for bad pixels
     flat_mask = get_slitmask(masterflat='masterflat.fits')
+    sky_mask = data > np.nanmedian(data) * frac_med
+    mask = np.logical_or(flat_mask, sky_mask)
     
     y_size, x_size = data.shape
-    spectral_bins = np.linspace(0, y_size, nbins)
-    
+    spectral_bin_edges = np.linspace(0, y_size, nbins + 1).astype(int)
+    bin_sizes = y_size / nbins
+    spectral_bin_centers = np.linspace(bin_sizes * 0.5,
+                                       bin_sizes * (nbins - 0.5) ,
+                                       nbins).astype(int)
+    box_size = round(seeing / arcsec_per_pix * nsigma)
+    x_low = initial_guess - box_size
+    x_high = initial_guess + box_size
 
+    crop = data[:, x_low: x_high]
+    mask = mask[:, x_low: x_high]
+    crop[mask] = np.nan
+
+    specbin_arrays = np.array_split(crop, spectral_bin_edges[1:-1])
+    specbins = np.empty(shape=(nbins, x_high - x_low))
+    for i, array in enumerate(specbin_arrays):
+        specbins[i] = np.nanmean(array, axis=0)
+
+    fit_centers = np.empty(specbins.shape[0])
+    x = np.arange(specbins.shape[1])
+    sigma = seeing / arcsec_per_pix
+    sky_limit = round(3 * sigma)
+    for i, specbin in enumerate(specbins):
+        mask = ~np.isnan(specbin)
+        a = np.nanmax(specbin[mask])
+        x0 = np.nanargmax(specbin)
+        sky = np.concatenate((specbin[:x0 - sky_limit], specbin[x0 + sky_limit:]))
+        b = np.nanmedian(sky)
+        params = [a, b, x0, sigma]
+        popt, pcov = curve_fit(_gaussian, x[mask], specbin[mask], p0=params)
+        # plot for sanity check
+        # space = np.linspace(0, x.max(), 1000)
+        # plt.plot(space, _gaussian(space, *popt))
+        # plt.plot(x[mask], specbin[mask], 'ko')
+        # plt.show()
+
+        # if err > 10**2, reject fit
+        perr = np.sqrt(np.diag(pcov))
+        # fit to gaussian and remember to add back cropped out spatial indices
+        fit_centers[i] = popt[2] + x_low if perr[2] < 10**2 else np.nan
+
+    mask = ~np.isnan(fit_centers)
+    # spline interpolation to get in between the binned spectral data
+    ap_spline = UnivariateSpline(spectral_bin_centers[mask], fit_centers[mask],
+                                 ext=0, k=3, s=1)
+    return fit_centers, spectral_bin_centers, ap_spline
+    
+    
+    
 def wavelength_solution():
     pass
 
