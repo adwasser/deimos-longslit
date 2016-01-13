@@ -380,6 +380,8 @@ def ap_trace(data, initial_guess,
         specbins[i] = np.nanmean(array, axis=0)
 
     fit_centers = np.empty(specbins.shape[0])
+    fit_sigmas = np.empty(specbins.shape[0])
+
     x = np.arange(specbins.shape[1])
     sigma = seeing / arcsec_per_pix
     sky_limit = round(3 * sigma)
@@ -392,34 +394,66 @@ def ap_trace(data, initial_guess,
         params = [a, b, x0, sigma]
         popt, pcov = curve_fit(_gaussian, x[mask], specbin[mask], p0=params)
         # plot for sanity check
-        # space = np.linspace(0, x.max(), 1000)
-        # plt.plot(space, _gaussian(space, *popt))
-        # plt.plot(x[mask], specbin[mask], 'ko')
-        # plt.show()
+        space = np.linspace(0, x.max(), 1000)
+        plt.clf()
+        plt.plot(space, _gaussian(space, *popt))
+        plt.plot(x[mask], specbin[mask], 'ko')
+        plt.show()
 
         # if err > 10**2, reject fit
         perr = np.sqrt(np.diag(pcov))
         # fit to gaussian and remember to add back cropped out spatial indices
-        fit_centers[i] = popt[2] + x_low if perr[2] < 10**2 else np.nan
+        if perr[2] < 10**2:
+            fit_centers[i] = popt[2] + x_low
+        else:
+            fit_centers[i] = np.nan
+        fit_sigmas[i] = popt[3]
 
     mask = ~np.isnan(fit_centers)
     # spline interpolation to get in between the binned spectral data
-    ap_spline = UnivariateSpline(spectral_bin_centers[mask], fit_centers[mask],
-                                 ext=0, k=3, s=1)
-    return fit_centers, spectral_bin_centers, ap_spline
+    trace_spline = UnivariateSpline(spectral_bin_centers[mask], fit_centers[mask],
+                                    ext=0, k=3, s=1)
+    sigma_spline = UnivariateSpline(spectral_bin_centers[mask], fit_sigmas[mask],
+                                    ext=0, k=3, s=1)
+    return trace_spline, sigma_spline
     
-    
-    
+def ap_extract(data, trace_spl, sigma_spl,
+               apwidth=2, skysep=1, skywidth=2, skydeg=0):
+    '''
+    Extract the spectrum using a specified trace.
+    Data is the 2d array, trace_spl, sigma_spl are the splines from ap_trace.
+
+    Parameters
+    -----------
+    :apwidth: in factors of sigma, corresponds to aperature radius
+    :skysep: in factors of sigma, corresponds to the separation between sky and aperature
+    :skywidth: in factors of sigma, corresponds to the width of sky windows on either side
+
+    Returns
+    -------
+    aperature
+    sky
+    ap_err
+    '''
+
+    y_size, x_size = data.shape
+    y_bins = np.arange(y_size)
+    x_centers = trace_spl(y_bins)
+    x_sigmas = sigma_spl(y_bins)
+
+    # specify aperature as a function of spectral position
+    x_lows = x_centers - apwidth * x_sigmas
+    x_highs = x_centers + apwidth * x_sigmas
+
+    left_sky_lows = 
+    xtract = 
+    pass
+
 def wavelength_solution():
     pass
 
 def wavelength_extract(wavesol, trace):
     pass
 
-def ap_extract(data, trace):
-    '''
-    Extract the spectrum using a specified trace.
-    '''
-    pass
     
 
