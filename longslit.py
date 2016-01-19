@@ -243,6 +243,7 @@ def make_masterflat(output="masterflat.fits", flatdir="flats/", bias="masterbias
         hdu.writeto(output, clobber=True)
     return flat
 
+
 def get_slitmask(masterflat='masterflat.fits'):
     # mask where not spatially illuminated due to bad slit coverage
     # also mask any spatial columns with saturated pixels
@@ -257,6 +258,7 @@ def get_slitmask(masterflat='masterflat.fits'):
     bad = np.logical_or(spatial < 0.9 * smoothed, spatial > 1.1 * smoothed)
     flat_mask = np.tile(bad, (flat.shape[0], 1))    
     return flat_mask
+
 
 def normalize(fitsname, output=None, cr_remove=True, multiextension=True,
               masterflat="masterflat.fits", masterbias="masterbias.fits"):
@@ -318,15 +320,9 @@ def data_combine(files, masterbias='masterbias.fits', masterflat='masterflat.fit
     '''
     Sum a list of images.
     '''
-    
     data = np.array([fits.getdata(f) for f in files])
-    # median out each frame
-    frame_medians = np.nanmedian(data, axis=(1,2))[:, np.newaxis, np.newaxis]
-    data = data / frame_medians
-    # get median of frames
-    median = np.nanmedian(data, axis=0)
-
     return data.sum(axis=0)
+
 
 def _gaussian(x, a, b, x0, sigma):
     # Gaussian function
@@ -393,12 +389,12 @@ def ap_trace(data, initial_guess,
         b = np.nanmedian(sky)
         params = [a, b, x0, sigma]
         popt, pcov = curve_fit(_gaussian, x[mask], specbin[mask], p0=params)
-        # plot for sanity check
-        space = np.linspace(0, x.max(), 1000)
-        plt.clf()
-        plt.plot(space, _gaussian(space, *popt))
-        plt.plot(x[mask], specbin[mask], 'ko')
-        plt.show()
+        # # plot for sanity check
+        # space = np.linspace(0, x.max(), 1000)
+        # plt.clf()
+        # plt.plot(space, _gaussian(space, *popt))
+        # plt.plot(x[mask], specbin[mask], 'ko')
+        # plt.show()
 
         # if err > 10**2, reject fit
         perr = np.sqrt(np.diag(pcov))
@@ -417,6 +413,7 @@ def ap_trace(data, initial_guess,
                                     ext=0, k=3, s=1)
     return trace_spline, sigma_spline
     
+
 def ap_extract(data, trace_spl, sigma_spl,
                apwidth=2, skysep=1, skywidth=2, skydeg=0):
     '''
@@ -428,29 +425,73 @@ def ap_extract(data, trace_spl, sigma_spl,
     :apwidth: in factors of sigma, corresponds to aperature radius
     :skysep: in factors of sigma, corresponds to the separation between sky and aperature
     :skywidth: in factors of sigma, corresponds to the width of sky windows on either side
+    :skydeg: degree of polynomial fit for the sky spatial profile at each wavelength
 
     Returns
     -------
-    aperature
+    source
     sky
     ap_err
     '''
 
     y_size, x_size = data.shape
+    y_indices, x_indices = np.indices(data.shape)
     y_bins = np.arange(y_size)
+    x_bins = np.arange(x_size)
     x_centers = trace_spl(y_bins)
     x_sigmas = sigma_spl(y_bins)
 
     # specify aperature as a function of spectral position
-    x_lows = x_centers - apwidth * x_sigmas
-    x_highs = x_centers + apwidth * x_sigmas
+    ap_lows = x_centers - apwidth * x_sigmas
+    ap_highs = x_centers + apwidth * x_sigmas
 
-    left_sky_lows = 
-    xtract = 
-    pass
+    right_sky_lows = x_centers - (apwidth + skysep + skywidth) * x_sigmas
+    right_sky_highs = x_centers - (apwidth + skysep) * x_sigmas
+    left_sky_lows = x_centers + (apwidth + skysep) * x_sigmas
+    left_sky_highs = x_centers + (apwidth + skysep + skywidth) * x_sigmas
+
+    ap_pixels = np.logical_and(ap_lows < x_indices, x_indices < ap_highs)
+    right_sky_pixels = np.logical_and(right_sky_lows < x_indices, x_indices < right_sky_highs)
+    left_sky_pixels = np.logical_and(left_sky_lows < x_indices, x_indices < left_sky_highs)    
+    sky_pixels = np.logical_or(right_sky_pixels, left_sky_pixels)
+
+    aperture = np.empty(y_size)
+    sky = np.empty(y_size)
+    unc = np.empty(y_size)
+    
+    for i in range(y_size):
+        data_slice = data[i]
+        ap_slice = data_slice[ap_pixels[i]]
+        aperture[i] = np.nansum(ap_slice)
+        sky_slice = data_slice[sky_pixels[i]]
+        x_sky = x_bins[sky_pixels[i]]
+        x_ap = x_bins[ap_pixels[i]]
+        if skydeg > 0:
+            pfit = np.polyfit(x_sky, sky, skydeg)
+            sky[i] = np.sum(np.polyval(pfit, x_ap))
+        elif skydeg == 0:
+            sky[i] = np.nanmean(sky_slice) * (apwidth * x_sigmas[i] * 2 + 1)
+
+        # for now...
+        coaddN = 1
+        # uncertainty, as done by PyDIS
+        sigB = np.std(sky_slice) # stddev in the background data
+        N_B = len(x_sky) # number of bkgd pixels
+        N_A = apwidth * x_sigmas[i] * 2. + 1 # number of aperture pixels
+        # based on aperture phot err description by F. Masci, Caltech:
+        # http://wise2.ipac.caltech.edu/staff/fmasci/ApPhotUncert.pdf
+        unc[i] = np.sqrt(np.sum((aperture[i] - sky[i]) / coaddN) +
+                         (N_A + N_A**2. / N_B) * (sigB**2.))
+
+    source = aperture - sky
+
+    return y_bins, aperture, sky, unc
+    
+
 
 def wavelength_solution():
     pass
+
 
 def wavelength_extract(wavesol, trace):
     pass
