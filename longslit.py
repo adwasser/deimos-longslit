@@ -1,3 +1,12 @@
+from __future__ import (absolute_import, division,
+                        print_function, unicode_literals,
+                        with_statement)
+from builtins import (
+         bytes, dict, int, list, object, range, str,
+         ascii, chr, hex, input, next, oct, open,
+         pow, round, super,
+         filter, map, zip)
+
 '''
 QaDDRL: Quick and Dirty DEIMOS Reduction of Longslit data.
 Rough order of business:
@@ -58,7 +67,8 @@ def grating_to_disp(name):
     elif name == '1200G':
         return 0.33
     else:
-        return np.nan
+        print(name, "is not a known grating!")
+        sys.exit()
 
 
 def get_indices(datasec):
@@ -261,7 +271,8 @@ def get_slitmask(masterflat='masterflat.fits'):
 
 
 def normalize(fitsname, output=None, cr_remove=True, multiextension=True,
-              masterflat="masterflat.fits", masterbias="masterbias.fits"):
+              masterflat="masterflat.fits", masterbias="masterbias.fits",
+              cr_options=None):
     '''
     Flat field and bias subtraction.
     
@@ -277,7 +288,8 @@ def normalize(fitsname, output=None, cr_remove=True, multiextension=True,
                      if None, then make a master flat from files in flatdir
         :masterbias: str, name of fits file with master bias (optional)
                      if None, then make a master bias from files in biasdir
-
+        :cr_options: dict, keys should be keywords of detect_cosmics from
+                     astroscrappy, overrides defaults below
     Returns:
     --------
         :normalized_data: 2d numpy array, rows are spectral, columns are spatial
@@ -301,10 +313,11 @@ def normalize(fitsname, output=None, cr_remove=True, multiextension=True,
         
     if cr_remove:
         flat_mask = get_slitmask(flat)
-        mask, cleaned = detect_cosmics(raw_data, verbose=True,
-                                       inmask=flat_mask,
-                                       cleantype='medmask',
-                                       sigclip=0.5, sigfrac=0.1, niter=4)
+        kwargs = {'verbose': True, 'inmask': flat_mask, 'cleantype': 'medmask',
+                  'sigclip': 0.5, 'sigfrac': 0.1, 'niter': 4}
+        for key, value in cr_options.items():
+            kwargs[key] = value
+        mask, cleaned = detect_cosmics(raw_data, **kwargs)
         normed_data = (cleaned - bias) / flat
     else:
         normed_data = (raw_data - bias) / flat
@@ -353,8 +366,9 @@ def ap_trace(data, initial_guess,
     # mask maker mask maker make me a mask
     # True for bad pixels
     flat_mask = get_slitmask(masterflat='masterflat.fits')
-    sky_mask = data > np.nanmedian(data) * frac_med
-    mask = np.logical_or(flat_mask, sky_mask)
+    # sky_mask = data > np.nanmedian(data) * frac_med
+    # mask = np.logical_or(flat_mask, sky_mask)
+    mask = flat_mask
     
     y_size, x_size = data.shape
     spectral_bin_edges = np.linspace(0, y_size, nbins + 1).astype(int)
@@ -389,7 +403,7 @@ def ap_trace(data, initial_guess,
         b = np.nanmedian(sky)
         params = [a, b, x0, sigma]
         popt, pcov = curve_fit(_gaussian, x[mask], specbin[mask], p0=params)
-        # # plot for sanity check
+        # plot for sanity check
         # space = np.linspace(0, x.max(), 1000)
         # plt.clf()
         # plt.plot(space, _gaussian(space, *popt))
@@ -468,7 +482,7 @@ def ap_extract(data, trace_spl, sigma_spl,
         x_ap = x_bins[ap_pixels[i]]
         if skydeg > 0:
             pfit = np.polyfit(x_sky, sky, skydeg)
-            sky[i] = np.sum(np.polyval(pfit, x_ap))
+            sky[i] = np.nansum(np.polyval(pfit, x_ap))
         elif skydeg == 0:
             sky[i] = np.nanmean(sky_slice) * (apwidth * x_sigmas[i] * 2 + 1)
 
@@ -488,13 +502,39 @@ def ap_extract(data, trace_spl, sigma_spl,
     return y_bins, aperture, sky, unc
     
 
+def wavelength_solution(trace_spl, arc_name, lines="good_lines.dat"):
+    '''
+    Calculate the wavelength solution, given an arcline calibration frame.
 
-def wavelength_solution():
-    pass
+    Parameters
+    ----------
+    trace_spl: trace spline (i.e., from ap_trace)
+    arc_name: str, name of fits file with arc frame
+    lines: str, name of file with lines (in Angstroms) as the first column
+
+    Returns
+    -------
+    wfunc: function from trace center to wavelength, in Angstroms
+    '''
+
+    header = fits.getheader(arc_name)
+    arc_data = fits.getdata(arc_name)
+    grating_name = header['GRATENAM']
+    grating_position = header['GRATEPOS']
+    # this should be the nominal wavelength at the center of the detector
+    # if I'm reading the info at the page below correctly
+    # http://www2.keck.hawaii.edu/inst/deimos/grating-info.html
+    f0 = header['G' + str(grating_position).strip() + 'TLTWAV']
+    f_per_pix = grating_to_disp(grating_name)
+    y0 = arc_data.shape[0] / 2
+    # not yet sure which is red side and which is blue side! :/
+    def init_guess(y): return f0 + f_per_pix * (y - y0)
+
+    f_lines = np.loadtxt(lines, usecols=(0,))
 
 
-def wavelength_extract(wavesol, trace):
-    pass
+
+
 
     
 
