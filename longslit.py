@@ -252,7 +252,7 @@ def make_masterflat(output="masterflat.fits", flatdir="flats/", bias="masterbias
     spectral_pixels = np.arange(spectral_size)
     spatial_pixels = np.arange(spatial_size)
     flat_1d = np.log10(convolve(flat.sum(axis=1), Box1DKernel(5)))
-    spline = UnivariateSpline(spectral_pixels, flat_1d, ext=0, k=2, s=0.001)
+    spline = UnivariateSpline(spectral_pixels, flat_1d, k=2, s=0.001)
     flat_curve = 10.0 ** spline(spectral_pixels)
     # tile back up to shape of flat file
     flat_curve = np.tile(np.split(flat_curve, flat_curve.size, axis=0), (1, spatial_size))
