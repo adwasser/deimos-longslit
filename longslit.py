@@ -8,22 +8,35 @@ from builtins import (
          filter, map, zip)
 
 '''
-QaDDRL: Quick and Dirty DEIMOS Reduction of Longslit data.
-Rough order of business:
-    Put Deimos fits hdu files in their place
-    Flat field and bias
-    Wavelength solution
-    Trace and continuum subtraction
-12/18/15
-    New plan: do reduction on individual chips (rather than trying to do the
-    whole darn thing at once.
+DRoLs: DEIMOS Reduction of Longslit data
+
+What this is: see name above.
+What this is not: bulletproof spectroscopic reduction.  This was made solely to
+get reasonably looking wavelength solutions for the 600ZD grating DEIMOS longslit
+data we obtained that seemed to break to "official" spec2d pipeline.  This does
+\it{not} do flux calibration.  Use at your own peril.
+
+Dependencies: the usual astropy suite (numpy, scipy, matplotlib, astropy)
+along with astroscrappy for cosmic ray subtraction
+
+Development notes:
+The DEIMOS chip layout is shown in the engineering drawings found here:
+http://www.ucolick.org/~sla/fits/mosaic/d0307j.pdf
+
+After getting a single array with the (as currently named)
+multiextension_to_array function, the dispersion axis will be in the y-axis
+(columns) and the spatial axis will be in x (rows).  Wavelength increases with
+y indices.
+
+Much of the inspiration for this comes from the PyDIS package, found here:
+https://github.com/jradavenport/pydis
 '''
 
 import sys, os, glob
 import numpy as np
 import numpy.ma as ma
 from matplotlib import pyplot as plt
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, minimize
 from astropy.convolution import convolve, Box1DKernel, Box2DKernel
 from scipy.signal import medfilt
 from scipy.interpolate import UnivariateSpline
@@ -429,7 +442,7 @@ def ap_trace(data, initial_guess,
     
 
 def ap_extract(data, trace_spl, sigma_spl,
-               apwidth=2, skysep=1, skywidth=2, skydeg=0):
+               apwidth=2, skysep=1, skywidth=2, skydeg=0, sky_subtract=True):
     '''
     Extract the spectrum using a specified trace.
     Data is the 2d array, trace_spl, sigma_spl are the splines from ap_trace.
@@ -472,6 +485,12 @@ def ap_extract(data, trace_spl, sigma_spl,
     aperture = np.empty(y_size)
     sky = np.empty(y_size)
     unc = np.empty(y_size)
+
+    if not sky_subtract:
+        # just return aperture sum
+        for i in range(y_size):
+            aperture[i] = np.nansum(data[i, ap_pixels[i]])
+        return aperture
     
     for i in range(y_size):
         data_slice = data[i]
@@ -499,18 +518,58 @@ def ap_extract(data, trace_spl, sigma_spl,
 
     source = aperture - sky
 
-    return y_bins, aperture, sky, unc
+    return aperture, sky, unc
+
+
+def _closest(item, array):
+    idx = np.argmin(np.abs(array - item))
+    return array(idx)
+
+
+def _premetric(array1, array2):
+    '''
+    This is a janky way of measuring how "close" two lists of floats are.
+    Not a metric, we fail symmetry and triangle inequality for simple cases.
+    '''
+    s = 0
+    for x in set1:
+        s += np.abs(x - _closest(x, array2))
+    return s
     
 
-def wavelength_solution(trace_spl, arc_name, lines="good_lines.dat"):
+def _good_lines(master_line_list="spec2d_lamp_NIST.dat"):
+    '''
+    Returns a list of line wavelengths to check against.
+    I have no idea what height refers to, but seems to work...
+    '''
+    specdat = np.loadtxt(master_line_list, dtype=str)
+    wave, height = specdat[:, 0:2].astype(float)
+    qual = specdat[:, 2]
+    good_line_indices = np.logical_and(qual == "GOOD", height > 500)
+    return wave[good_line_indices]
+    
+def get_lines(ap_lines):
+    '''
+    ap_lines is a 1d array with lots of peaks.  return the indices of those peaks!
+    '''
+    pass
+    
+def wavelength_solution(trace_spl, sigma_spl, arc_name, lines="spec2d_lamp_NIST.dat",
+                        mode='poly', deg=2):
     '''
     Calculate the wavelength solution, given an arcline calibration frame.
+    I'm assuming that the initial guess is very good (i.e., that we can identify
+    lines based on which are the closest) and that there are more lines in
+    arc_lines than list_lines.
 
     Parameters
     ----------
     trace_spl: trace spline (i.e., from ap_trace)
+    sigma_spl: sigma spline (from ap_trace)
     arc_name: str, name of fits file with arc frame
     lines: str, name of file with lines (in Angstroms) as the first column
+    mode: str, poly for polynomial fit
+    deg: int, degree of fit for poly mode
 
     Returns
     -------
@@ -524,17 +583,36 @@ def wavelength_solution(trace_spl, arc_name, lines="good_lines.dat"):
     # this should be the nominal wavelength at the center of the detector
     # if I'm reading the info at the page below correctly
     # http://www2.keck.hawaii.edu/inst/deimos/grating-info.html
-    f0 = header['G' + str(grating_position).strip() + 'TLTWAV']
-    f_per_pix = grating_to_disp(grating_name)
+    w0 = header['G' + str(grating_position).strip() + 'TLTWAV']
+    w_per_pix = grating_to_disp(grating_name)
     y0 = arc_data.shape[0] / 2
-    # not yet sure which is red side and which is blue side! :/
-    def init_guess(y): return f0 + f_per_pix * (y - y0)
 
-    f_lines = np.loadtxt(lines, usecols=(0,))
+    list_lines = _good_lines(lines)
+    
+    # get pixel values of lines    
+    ap_lines = ap_extract(arc_data, trace_spl, sigma_spl, sky_subtract=False)
 
+    # need to implement
+    arc_lines = get_lines(ap_lines)
+    
+    # array of zeroth degree and linear terms
+    p0 = np.array([w0, w_per_pix])
+    return p0
+    # append zero terms for higher order fits
+    if len(p0) < deg + 1:
+        # assuming that p0 refers to the lower degrees only
+        p0 = np.append(p0, np.zeros(deg + 1 - len(p0)))
+    
+    if mode == 'poly':
+        # I'm using lower to higher terms for fit, but polyval
+        # uses higher to lower
+        def fit_function(x, p): return np.polyval(p[::-1], x)
+    else:
+        raise NotImplementedError("Only mode='poly' is currently implemented.")
 
+    def min_function(p): return _premetric(fit_function(arc_lines, p), list_lines)    
+    popt, pcov = minimize(min_function, p0)
 
-
-
+    return popt, pcov
     
 
