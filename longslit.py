@@ -37,7 +37,7 @@ import numpy as np
 import numpy.ma as ma
 from matplotlib import pyplot as plt
 from scipy.optimize import curve_fit, minimize
-from astropy.convolution import convolve, Box1DKernel, Box2DKernel
+from astropy.convolution import convolve, Box1DKernel, MexicanHat1DKernel
 from scipy.signal import medfilt
 from scipy.interpolate import UnivariateSpline
 from scipy.interpolate import SmoothBivariateSpline
@@ -532,7 +532,7 @@ def _premetric(array1, array2):
     Not a metric, we fail symmetry and triangle inequality for simple cases.
     '''
     s = 0
-    for x in set1:
+    for x in array1:
         s += np.abs(x - _closest(x, array2))
     return s
     
@@ -543,17 +543,74 @@ def _good_lines(master_line_list="spec2d_lamp_NIST.dat"):
     I have no idea what height refers to, but seems to work...
     '''
     specdat = np.loadtxt(master_line_list, dtype=str)
-    wave, height = specdat[:, 0:2].astype(float)
+    wave, height = specdat[:, 0:2].astype(float).T
     qual = specdat[:, 2]
     good_line_indices = np.logical_and(qual == "GOOD", height > 500)
     return wave[good_line_indices]
     
+
 def get_lines(ap_lines):
     '''
     ap_lines is a 1d array with lots of peaks.  return the indices of those peaks!
     '''
-    pass
+    smooth = convolve(ap_lines, MexicanHat1DKernel(2))
+    y = np.arange(ap_lines.shape[0])
+    w = smooth > 0.1 * smooth.max()
     
+    pixels = y[w]
+    s = smooth[w]
+    
+    # go through pixels with spec above threshold, and look for successive pixels
+    centers = []
+    heights = []
+    spreads = []
+    run = [pixels[0]]
+    for i, pixel in enumerate(pixels[1:]):
+        # i gives (index in y) - 1
+        # check if this pixel is one more than previous
+        
+        if run[-1] + 1 == pixel:
+            run.append(pixel)
+        else:
+            # then this pixel is in the next run
+            # process the run and put the pixel in the new run
+            # print(run)
+            run_array = np.array(run)
+            center = np.mean(run_array)
+            centers.append(center)
+            heights.append(ap_lines[round(center)])
+            spreads.append(len(run))
+            # reset
+            run = [pixel]
+        if i == len(y) - 2:
+            # then this is the last pixel
+            # process the run and end loop
+            # print(run)
+            run_array = np.array(run)
+            center = np.mean(run_array)
+            centers.append(center)
+            heights.append(smooth[round(center)])
+            spreads.append(len(run))
+    # now process all the lines found and fit with a gaussian to find a better center
+    fit_centers = []
+    for i in range(len(centers)):
+        a = heights[i]
+        b = 10**-2 * centers[i]
+        x0 = centers[i]
+        sigma = spreads[i] / 2.
+        p0 = [a, b, x0, sigma]
+        indices = slice(round(x0 - 3 * sigma), round(x0 + 3 * sigma))
+        popt, pcov = curve_fit(_gaussian, y[indices], ap_lines[indices], p0)
+        fit_centers.append(popt[2])
+        # sanity plots
+        # plt.clf()
+        # plt.plot(y[indices], _gaussian(y[indices], *popt), 'r-')
+        # plt.plot(y[indices], ap_lines[indices], 'ko')
+        # plt.show()
+    return fit_centers
+            
+    
+
 def wavelength_solution(trace_spl, sigma_spl, arc_name, lines="spec2d_lamp_NIST.dat",
                         mode='poly', deg=2):
     '''
@@ -597,7 +654,6 @@ def wavelength_solution(trace_spl, sigma_spl, arc_name, lines="spec2d_lamp_NIST.
     
     # array of zeroth degree and linear terms
     p0 = np.array([w0, w_per_pix])
-    return p0
     # append zero terms for higher order fits
     if len(p0) < deg + 1:
         # assuming that p0 refers to the lower degrees only
