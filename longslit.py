@@ -523,13 +523,14 @@ def ap_extract(data, trace_spl, sigma_spl,
 
 def _closest(item, array):
     idx = np.argmin(np.abs(array - item))
-    return array(idx)
+    return array[idx]
 
 
 def _premetric(array1, array2):
     '''
     This is a janky way of measuring how "close" two lists of floats are.
-    Not a metric, we fail symmetry and triangle inequality for simple cases.
+    Not a metric, we fail symmetry and triangle inequality for simple cases
+    of different sized arrays.
     '''
     s = 0
     for x in array1:
@@ -546,7 +547,7 @@ def _good_lines(master_line_list="spec2d_lamp_NIST.dat"):
     wave, height = specdat[:, 0:2].astype(float).T
     qual = specdat[:, 2]
     good_line_indices = np.logical_and(qual == "GOOD", height > 500)
-    return wave[good_line_indices]
+    return wave[good_line_indices], height[good_line_indices]
     
 
 def get_lines(ap_lines):
@@ -593,6 +594,7 @@ def get_lines(ap_lines):
             spreads.append(len(run))
     # now process all the lines found and fit with a gaussian to find a better center
     fit_centers = []
+    fit_heights = []
     for i in range(len(centers)):
         a = heights[i]
         b = 10**-2 * centers[i]
@@ -602,17 +604,18 @@ def get_lines(ap_lines):
         indices = slice(round(x0 - 3 * sigma), round(x0 + 3 * sigma))
         popt, pcov = curve_fit(_gaussian, y[indices], ap_lines[indices], p0)
         fit_centers.append(popt[2])
+        fit_heights.append(popt[0])
         # sanity plots
         # plt.clf()
         # plt.plot(y[indices], _gaussian(y[indices], *popt), 'r-')
         # plt.plot(y[indices], ap_lines[indices], 'ko')
         # plt.show()
-    return fit_centers
+    return np.array(fit_centers), np.array(fit_heights)
             
     
 
 def wavelength_solution(trace_spl, sigma_spl, arc_name, lines="spec2d_lamp_NIST.dat",
-                        mode='poly', deg=2):
+                        mode='poly', deg=4, method='Nelder-Mead'):
     '''
     Calculate the wavelength solution, given an arcline calibration frame.
     I'm assuming that the initial guess is very good (i.e., that we can identify
@@ -644,13 +647,13 @@ def wavelength_solution(trace_spl, sigma_spl, arc_name, lines="spec2d_lamp_NIST.
     w_per_pix = grating_to_disp(grating_name)
     y0 = arc_data.shape[0] / 2
 
-    list_lines = _good_lines(lines)
+    list_lines, list_heights = _good_lines(lines)
     
     # get pixel values of lines    
     ap_lines = ap_extract(arc_data, trace_spl, sigma_spl, sky_subtract=False)
 
     # need to implement
-    arc_lines = get_lines(ap_lines)
+    arc_lines, arc_heights = get_lines(ap_lines)
     
     # array of zeroth degree and linear terms
     p0 = np.array([w0, w_per_pix])
@@ -662,13 +665,15 @@ def wavelength_solution(trace_spl, sigma_spl, arc_name, lines="spec2d_lamp_NIST.
     if mode == 'poly':
         # I'm using lower to higher terms for fit, but polyval
         # uses higher to lower
-        def fit_function(x, p): return np.polyval(p[::-1], x)
+        def fit_function(y, p): return np.polyval(p[::-1], y)
     else:
         raise NotImplementedError("Only mode='poly' is currently implemented.")
 
-    def min_function(p): return _premetric(fit_function(arc_lines, p), list_lines)    
-    popt, pcov = minimize(min_function, p0)
+    # subtract y pixels by zeros point at center
+    def min_function(p): return _premetric(fit_function(arc_lines - y0, p), list_lines)    
+    res = minimize(min_function, p0, method=method, options={'disp': True})
 
-    return popt, pcov
+    def wfunc(y): return fit_function(y - y.shape[0]/2., res.x)
+    return wfunc
     
 
