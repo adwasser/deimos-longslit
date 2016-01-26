@@ -1,9 +1,7 @@
-# LSDEIMOS #
+# LS-DEIMOS #
 Quick and dirty DEIMOS longslit data reduction.
 
-Contact:
-Asher Wasserman
-adwasser@ucsc.edu
+Contact: Asher Wasserman, adwasser@ucsc.edu
 
 What this does:
 * combines flat and bias frames
