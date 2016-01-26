@@ -246,7 +246,7 @@ def normalize(fitsname, output=None, cr_remove=True, multiextension=True,
     return normed_data
 
 
-def ap_trace(data, initial_guess=None,
+def ap_trace(data, initial_guess=None, masterflat="masterflat.fits",
              nbins=20, nsigma=15, seeing=1., arcsec_per_pix=0.1185, frac_med=1.5):
     '''
     Traces the spatial apeture of a gaussian point source.
@@ -269,7 +269,7 @@ def ap_trace(data, initial_guess=None,
 
     # mask maker mask maker make me a mask
     # True for bad pixels
-    flat_mask = get_slitmask(masterflat='masterflat.fits')
+    flat_mask = get_slitmask(masterflat=masterflat)
     # sky_mask = data > np.nanmedian(data) * frac_med
     # mask = np.logical_or(flat_mask, sky_mask)
     mask = flat_mask
@@ -487,11 +487,8 @@ def wavelength_solution(trace_spl, sigma_spl, arc_name, lines="spec2d_lamp_NIST.
     return wfunc
     
 
-if __name__ == "__main__":
+def reduce_files(files, save=True, plot=True):
 
-    files = sys.argv[1:]
-
-    plt.ioff()    
     for f in files:
         
         print("Cleaning", f)
@@ -500,7 +497,7 @@ if __name__ == "__main__":
             clean = fits.getdata(clean_name)
         else:
             clean = normalize(f, output=clean_name)
-            
+        continue
         print("Tracing", f)
         trace_spl, sigma_spl = ap_trace(clean)
         
@@ -512,13 +509,18 @@ if __name__ == "__main__":
 
         y = np.arange(ap.size)
         w = wfunc(y)
-        header = "Spectrum extracted from " + f + "\nAngstroms\tFlux"
-        write_array = list(zip(w, ap - sky, unc))
-        
-        np.savetxt(f.split('.')[0] + ".dat", write_array, header=header)
-        plt.clf()
-        plt.plot(wfunc(y), ap - sky, 'k-')
-        plt.xlabel("Wavelength (Angstroms)")
-        plt.ylabel("Relatived flux (arbitrary units)")
-        plt.show()
+        if save:
+            header = "Spectrum extracted from " + f + "\nAngstroms\tFlux"
+            write_array = list(zip(w, ap - sky, unc))
+            np.savetxt(f.split('.')[0] + ".dat", write_array, header=header)
+        if plot:
+            plt.clf()
+            plt.plot(wfunc(y), ap - sky, 'k-')
+            plt.xlabel("Wavelength (Angstroms)")
+            plt.ylabel("Relatived flux (arbitrary units)")
+            plt.show()
+    
+    
+if __name__ == "__main__":
+    reduce_files(sys.argv[1:])
         
