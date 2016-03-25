@@ -256,6 +256,7 @@ def ap_trace(data, initial_guess=None, masterflat="masterflat.fits",
     data: 2d numpy array
     initial_guess: int, initial guess for the spatial position (here assumed as
                    x-axis) of the source
+    masterflat: str, name of flat file to use
     nbins: int, number of spectral bins to fit trace
     nsigma: float, how far away from the peak should the trace look, in stdev
     seeing: float, in arcsec, used to get an initial sigma guess for the trace
@@ -264,7 +265,8 @@ def ap_trace(data, initial_guess=None, masterflat="masterflat.fits",
 
     Returns:
     --------
-    trace: 1d numpy array, spatial (x) pixel index for each spectral (y) point
+    trace_spl: function from spectral index (y) to spatial index (x)
+    sigma_spl: function from spectral index (y) to width in spatial index
     '''
 
     # mask maker mask maker make me a mask
@@ -425,7 +427,7 @@ def ap_extract(data, trace_spl, sigma_spl,
 
 
 def wavelength_solution(trace_spl, sigma_spl, arc_name, lines="spec2d_lamp_NIST.dat",
-                        mode='poly', deg=4, method='Nelder-Mead'):
+                        mode='poly', deg=4, method='Nelder-Mead', linear_no_fit=False):
     '''
     Calculate the wavelength solution, given an arcline calibration frame.
     I'm assuming that the initial guess is very good (i.e., that we can identify
@@ -440,6 +442,8 @@ def wavelength_solution(trace_spl, sigma_spl, arc_name, lines="spec2d_lamp_NIST.
     lines: str, name of file with lines (in Angstroms) as the first column
     mode: str, poly for polynomial fit
     deg: int, degree of fit for poly mode
+    method: str, optimization method to use
+    linear_no_fit: bool, if true, then just return the inital guess from header
 
     Returns
     -------
@@ -457,6 +461,10 @@ def wavelength_solution(trace_spl, sigma_spl, arc_name, lines="spec2d_lamp_NIST.
     w_per_pix = grating_to_disp(grating_name)
     y0 = arc_data.shape[0] / 2
 
+    if linear_no_fit:
+        def wfunc(y): return w0 + w_per_pix * (y - y0)
+        return wfunc
+    
     list_lines, list_heights = good_lines(lines)
     
     # get pixel values of lines    
