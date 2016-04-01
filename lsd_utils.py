@@ -21,6 +21,8 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from astroscrappy import detect_cosmics
 
+LSD_DIR = '/Users/asher/work/software/lsdeimos/'
+
 def deimos_cards(shape, bunit='Counts'):
     '''
     Record fits header information.
@@ -56,7 +58,7 @@ def grating_to_disp(name):
     elif name == '1200G':
         return 0.33
     else:
-        print(name, "is not a known grating!")
+        raise ValueError(name + " is not a known grating!")
         sys.exit()
 
 
@@ -216,7 +218,34 @@ def get_lines(ap_lines):
         # plt.show()
     return np.array(fit_centers), np.array(fit_heights)
             
+
+def get_initial_wavesol(header):
+    '''
+    Retrieves the first two terms (constant and linear) from the fits header.
+    '''
+    grating_name = header['GRATENAM']
+    # this should be the nominal wavelength at the center of the detector
+    # if I'm reading the info at the page below correctly
+    # http://www2.keck.hawaii.edu/inst/deimos/grating-info.html
+    grating_position = header['GRATEPOS']
+    w0 = header['G' + str(grating_position).strip() + 'TLTWAV']
+    w_per_pix = grating_to_disp(grating_name)
+    p0 = np.array([w0, w_per_pix])
+    return p0
     
+
+def get_sky_spectrum(grating='1200G'):
+    if grating == '1200G':
+        sky_file = LSD_DIR + 'sky_spectra/mkea_sky_newmoon_DEIMOS_1200_2011oct.fits.gz'
+    elif grating == '600ZD':
+        sky_file = LSD_DIR + 'sky_spectra/mkea_sky_newmoon_DEIMOS_600_2011oct.fits.gz'
+    else:
+        raise ValueError('Grating name must be either "1200G" or "600ZD".')
+    f = fits.open(sky_file)
+    wavelengths = f[0].data
+    fluxes = f[1].data
+    return wavelengths, fluxes
+
 def list_lines():
     '''
     String containing arc lines from spec2d_lamp_NIST.dat

@@ -39,7 +39,8 @@ import numpy as np
 from matplotlib import pyplot as plt
 from scipy.optimize import curve_fit, minimize
 from astropy.convolution import convolve, Box1DKernel
-from scipy.interpolate import UnivariateSpline
+from scipy.interpolate import UnivariateSpline, interp1d
+from scipy.integrate import quad
 from scipy.signal import medfilt
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -247,7 +248,7 @@ def normalize(fitsname, output=None, cr_remove=True, multiextension=True,
 
 
 def ap_trace(data, initial_guess=None, masterflat="masterflat.fits",
-             nbins=20, nsigma=15, seeing=1., arcsec_per_pix=0.1185, frac_med=1.5):
+             nbins=20, nsigma=15, seeing=1., arcsec_per_pix=0.1185, frac_med=1.5, slit_width=1.):
     '''
     Traces the spatial apeture of a gaussian point source.
 
@@ -262,11 +263,12 @@ def ap_trace(data, initial_guess=None, masterflat="masterflat.fits",
     seeing: float, in arcsec, used to get an initial sigma guess for the trace
     arcsec_per_pix: float, float, should get from header, default for DEIMOS
     frac_med: float, fraction of median image above which to mask (e.g., for sky lines)
+    slit_width: float, arcsec, width of slit
 
     Returns:
     --------
-    trace_spl: function from spectral index (y) to spatial index (x)
-    sigma_spl: function from spectral index (y) to width in spatial index
+    trace: function from spectral index (y) to spatial index (x)
+    sigma: function from spectral index (y) to width in spatial index
     '''
 
     # mask maker mask maker make me a mask
@@ -275,8 +277,10 @@ def ap_trace(data, initial_guess=None, masterflat="masterflat.fits",
     # sky_mask = data > np.nanmedian(data) * frac_med
     # mask = np.logical_or(flat_mask, sky_mask)
     mask = flat_mask
-    
+
     y_size, x_size = data.shape
+    # try to do binning on smaller scale based on slit width
+    nbins = int(y_size * arcsec_per_pix / slit_width / 10)
     spectral_bin_edges = np.linspace(0, y_size, nbins + 1).astype(int)
     bin_sizes = y_size / nbins
     spectral_bin_centers = np.linspace(bin_sizes * 0.5,
@@ -338,12 +342,28 @@ def ap_trace(data, initial_guess=None, masterflat="masterflat.fits",
         fit_sigmas[i] = popt[3]
 
     mask = ~np.isnan(fit_centers)
+    sigma_median = np.nanmedian(fit_sigmas)
+    sigma_range = seeing / arcsec_per_pix
+    mask = mask & (fit_sigmas < sigma_median + sigma_range)
+    mask = mask & (fit_sigmas > sigma_median - sigma_range)
+
+    # polynomial fit to fit centers and sigmas
+    poly_center = np.polyfit(spectral_bin_centers[mask].astype(float),
+                             fit_centers[mask].astype(float), deg=2,
+                             w=1 / fit_sigmas[mask].astype(float)**2)
+    poly_sigma = np.polyfit(spectral_bin_centers[mask].astype(float),
+                            fit_sigmas[mask].astype(float), deg=2)
+
+    trace = lambda y: np.polyval(poly_center, y)
+    sigma = lambda y: np.polyval(poly_sigma, y)
+    return trace, sigma
+
     # spline interpolation to get in between the binned spectral data
-    trace_spline = UnivariateSpline(spectral_bin_centers[mask], fit_centers[mask],
-                                    ext=0, k=3, s=1)
-    sigma_spline = UnivariateSpline(spectral_bin_centers[mask], fit_sigmas[mask],
-                                    ext=0, k=3, s=1)
-    return trace_spline, sigma_spline
+    # trace_spline = UnivariateSpline(spectral_bin_centers[mask], fit_centers[mask],
+    #                                 k=3, s=1)
+    # sigma_spline = UnivariateSpline(spectral_bin_centers[mask], fit_sigmas[mask],
+    #                                 k=3, s=1)
+    # return trace_spline, sigma_spline
     
 
 def ap_extract(data, trace_spl, sigma_spl,
@@ -361,9 +381,9 @@ def ap_extract(data, trace_spl, sigma_spl,
 
     Returns
     -------
-    source
+    ap
     sky
-    ap_err
+    uncertainty
     '''
 
     y_size, x_size = data.shape
@@ -405,7 +425,7 @@ def ap_extract(data, trace_spl, sigma_spl,
         x_sky = x_bins[sky_pixels[i]]
         x_ap = x_bins[ap_pixels[i]]
         if skydeg > 0:
-            pfit = np.polyfit(x_sky, sky, skydeg)
+            pfit = np.polyfit(x_sky, sky_slice, skydeg)
             sky[i] = np.nansum(np.polyval(pfit, x_ap))
         elif skydeg == 0:
             sky[i] = np.nanmean(sky_slice) * (apwidth * x_sigmas[i] * 2 + 1)
@@ -421,9 +441,57 @@ def ap_extract(data, trace_spl, sigma_spl,
         unc[i] = np.sqrt(np.sum((aperture[i] - sky[i]) / coaddN) +
                          (N_A + N_A**2. / N_B) * (sigB**2.))
 
-    source = aperture - sky
-
     return aperture, sky, unc
+
+
+def sky_wavesol(sky, header, deg=4):
+    '''
+    Calculate the wavelength solution from the sky calibration.
+
+    Parameters
+    ----------
+    sky: float array, sky spectrum from ap_extract
+    header: header from data file
+    deg: int, degree of fit for poly mode
+
+    Returns
+    -------
+    wfunc: function from trace center to wavelength, in Angstroms
+    '''
+
+    p0 = get_initial_wavesol(header)
+    if len(p0) < deg + 1:
+        # assuming that p0 refers to the lower degrees only
+        p0 = np.append(p0, np.zeros(deg + 1 - len(p0)))
+    grating_name = header['GRATENAM']
+    
+    sky_wave, sky_flux = get_sky_spectrum(grating_name)
+    # function from wavelength in angstroms to sky flux
+    f_ref = interp1d(sky_wave, sky_flux, bounds_error=False, fill_value=np.nan)
+
+    # map pixel space to sky flux
+    # I'm using lower to higher terms for fit, but polyval
+    # uses higher to lower
+    def poly_wave(y, p): return np.polyval(p[::-1], y)
+    def fit_function(y, *p): return f_ref(poly_wave(y, p))
+    return fit_function
+
+    y = np.arange(sky.size)
+    y0 = y.size / 2.
+    
+    # normalize to height
+    sky_normed = sky * np.amax(sky_flux) / np.amax(sky)
+    # w_init = poly_wave(y - y0, p0)
+    # w_low = w_init[0]
+    # w_high = w_init[-1]
+    # ref_area = quad(f_ref, w_low, w_high)[0]
+    # sky_area = np.sum(sky)
+    # sky_normed = sky * ref_area / sky_area
+
+    # subtract y pixels by zeros point at center
+    popt, pcov = curve_fit(fit_function, y - y0, sky_normed, p0)
+    def wfunc(y): return poly_wave(y - y0, popt)
+    return wfunc
 
 
 def wavelength_solution(trace_spl, sigma_spl, arc_name, lines="spec2d_lamp_NIST.dat",
@@ -470,7 +538,7 @@ def wavelength_solution(trace_spl, sigma_spl, arc_name, lines="spec2d_lamp_NIST.
     # get pixel values of lines    
     ap_lines = ap_extract(arc_data, trace_spl, sigma_spl, sky_subtract=False)
 
-    # need to implement
+    # list of arc lines
     arc_lines, arc_heights = get_lines(ap_lines)
     
     # array of zeroth degree and linear terms
