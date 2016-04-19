@@ -1,5 +1,5 @@
-# LS-DEIMOS #
-Quick and dirty DEIMOS longslit data reduction.
+# DEIMOS-LONGSLIT #
+Quick DEIMOS longslit data reduction.
 
 Contact: Asher Wasserman, adwasser@ucsc.edu
 
@@ -10,11 +10,10 @@ What this does:
 * extracts a spectrum and subtracts sky flux
 * calibrates wavelength solution
 
-What this does not do:
+What this does not do (yet!):
 
 * any quality checks
 * flux calibration
-* ... who knows?
 
 Dependencies:
 
